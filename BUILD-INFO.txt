@@ -1,2 +1,0 @@
-YWD-RF development branch
-Current milestone: 0.0.1-dev RF Lab
