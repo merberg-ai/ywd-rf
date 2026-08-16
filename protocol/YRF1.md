@@ -1,50 +1,45 @@
-# YRF1 Protocol
+# YRF1 protocol
 
-YRF1 is the planned application/protocol layer for YWD-RF.
+YRF1 is the experimental application/protocol layer for YWD-RF.
 
-This document intentionally starts as a design placeholder. Field sizes and binary encoding will be finalized only after the RF Lab milestone establishes practical SX1262 packet sizes, timing, and loss characteristics on the target hardware.
+## Status
 
-## Initial requirements
+`0.0.1-dev` uses only a temporary RF Lab test frame:
 
-YRF1 should support:
+```text
+YRF1|TEST|<node-id>|<sequence>
+```
 
-- protocol versioning
-- source and destination node identity
-- message/transfer IDs
-- packet type
-- sequence information
+Example:
+
+```text
+YRF1|TEST|YWD-A43F|218
+```
+
+This human-readable frame is intentionally temporary. It is useful for first hardware bring-up and serial debugging but is not the final binary protocol.
+
+## Planned binary framing
+
+The first real YRF1 frame format will reserve fields for:
+
+- protocol magic/version
+- frame type
+- source address
+- destination address
+- message/transfer ID
+- sequence or fragment number
+- flags
 - payload length
-- integrity checking
-- ACK/retry semantics
-- duplicate rejection
-- text messages
-- status/control frames
-- fragmented binary transfers
-- missing-block recovery
-- interrupted-transfer resume
+- payload
+- integrity check
 
-## Planned early packet types
+Initial frame types are expected to include `HELLO`, `TEXT`, `ACK`, `PING`, `PONG`, and `STATUS`, followed later by image-transfer metadata/data/recovery frames.
 
-```text
-HELLO
-TEXT
-ACK
-PING
-PONG
-STATUS
-```
+## Design rules
 
-Later transfer types are expected to include:
-
-```text
-IMAGE_META
-IMAGE_BLOCK
-TRANSFER_ACK
-TRANSFER_NACK
-TRANSFER_DONE
-TRANSFER_RESUME
-```
-
-## Scope rule
-
-YRF1 begins as a point-to-point protocol. Addressing is included from the beginning so multi-node operation can be added later without redesigning every frame, but routing/mesh behavior is explicitly deferred.
+- A node must be able to operate without a phone connected.
+- Duplicate frames must be safely detectable.
+- Higher layers must tolerate loss and retransmission.
+- Interrupted bulk transfers must eventually support selective resume.
+- RF transport details should not leak unnecessarily into the WebUI.
+- Node identity is runtime configuration; all compatible nodes run one firmware image.
