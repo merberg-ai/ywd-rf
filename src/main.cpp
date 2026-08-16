@@ -100,7 +100,7 @@ void scheduleNextTx() {
 }
 
 void transmitTestPacket() {
-  const String payload = makeTestPayload(nodeId, ++txSequence);
+  String payload = makeTestPayload(nodeId, ++txSequence);
   Serial.printf("[TX] #%lu %s\n", static_cast<unsigned long>(txSequence), payload.c_str());
 
   radio.clearDio1Action();
