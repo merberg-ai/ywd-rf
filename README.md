@@ -101,4 +101,4 @@ YWD-RF is experimental radio software. Use frequencies, power levels, antennas, 
 
 ## License
 
-License selection is pending during initial project bootstrap.
+YWD-RF is released under The Unlicense. See `LICENSE`.
