@@ -1,0 +1,36 @@
+name: Build YWD-RF
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  platformio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Upload firmware artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ywd-rf-firmware-${{ github.sha }}
+          path: |
+            .pio/build/ywd_rf/firmware.bin
+            .pio/build/ywd_rf/bootloader.bin
+            .pio/build/ywd_rf/partitions.bin
+          if-no-files-found: warn
