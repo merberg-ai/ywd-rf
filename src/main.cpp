@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <U8g2lib.h>
 #include <Wire.h>
+#include <esp_system.h>
 
 #include "config.h"
 #include "rf_lab.h"
