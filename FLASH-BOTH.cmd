@@ -1,7 +1,8 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-call scripts\common.cmd || (pause & exit /b %errorlevel%)
+call scripts\common.cmd
+if errorlevel 1 (pause & exit /b 20)
 
 echo YWD-RF FLASH-BOTH
 echo -----------------
@@ -26,15 +27,15 @@ if /I "!PORT1!"=="!PORT2!" (
 
 echo.
 echo Building once...
-pio run
+py -3 -m platformio run
 if errorlevel 1 (pause & exit /b 1)
 
 echo Flashing !PORT1!...
-pio run -t upload --upload-port "!PORT1!"
+py -3 -m platformio run -t upload --upload-port "!PORT1!"
 if errorlevel 1 (pause & exit /b 1)
 
 echo Flashing !PORT2!...
-pio run -t upload --upload-port "!PORT2!"
+py -3 -m platformio run -t upload --upload-port "!PORT2!"
 if errorlevel 1 (pause & exit /b 1)
 
 echo.

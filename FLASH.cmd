@@ -1,7 +1,8 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-call scripts\common.cmd || (pause & exit /b %errorlevel%)
+call scripts\common.cmd
+if errorlevel 1 (pause & exit /b 20)
 
 if not "%~1"=="" (
   set "PORT=%~1"
@@ -16,7 +17,7 @@ if not defined PORT (
 )
 
 echo [YWD-RF] Building and flashing %PORT%...
-pio run -t upload --upload-port "%PORT%"
+py -3 -m platformio run -t upload --upload-port "%PORT%"
 if errorlevel 1 (
   echo.
   echo Upload failed. If the ESP32-S3 is stuck, try recovery mode:

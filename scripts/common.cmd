@@ -1,19 +1,18 @@
 @echo off
-setlocal
+rem Shared prerequisite check. Call from a root-level script after cd /d "%~dp0".
 
-rem Shared helper. Call with: call scripts\common.cmd
-
-set "YWD_ROOT=%~dp0.."
-for %%I in ("%YWD_ROOT%") do set "YWD_ROOT=%%~fI"
-pushd "%YWD_ROOT%" >nul
-
-where pio >nul 2>&1
+where py >nul 2>&1
 if errorlevel 1 (
-  echo [ERROR] PlatformIO Core ^(pio^) was not found in PATH.
-  echo         Run SETUP.cmd first.
-  popd >nul
+  echo [ERROR] Python launcher ^(py^) was not found.
+  echo         Run SETUP.cmd after installing Python 3.11+.
   exit /b 20
 )
 
-popd >nul
+py -3 -m platformio --version >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] PlatformIO Core is not installed for this Python.
+  echo         Run SETUP.cmd first.
+  exit /b 21
+)
+
 exit /b 0

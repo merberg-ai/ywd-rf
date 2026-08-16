@@ -6,7 +6,7 @@ import sys
 
 def devices():
     proc = subprocess.run(
-        ["pio", "device", "list", "--json-output"],
+        [sys.executable, "-m", "platformio", "device", "list", "--json-output"],
         check=True,
         capture_output=True,
         text=True,

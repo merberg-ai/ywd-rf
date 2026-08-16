@@ -14,14 +14,26 @@
 using namespace ywd;
 
 SPIClass loraSpi(FSPI);
-SX1262 radio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY, loraSpi);
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, PIN_OLED_RST, PIN_OLED_SCL, PIN_OLED_SDA);
+SPISettings loraSpiSettings(2000000, MSBFIRST, SPI_MODE0);
+SX1262 radio = new Module(
+    PIN_LORA_NSS,
+    PIN_LORA_DIO1,
+    PIN_LORA_RST,
+    PIN_LORA_BUSY,
+    loraSpi,
+    loraSpiSettings);
+
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(
+    U8G2_R0,
+    PIN_OLED_RST,
+    PIN_OLED_SCL,
+    PIN_OLED_SDA);
 
 RfStats stats;
 String nodeId;
 String lastSource = "-";
 uint32_t txSequence = 0;
-uint32_t lastTxAt = 0;
+uint32_t nextTxAt = 0;
 uint32_t lastDisplayAt = 0;
 volatile bool receivedFlag = false;
 bool radioOk = false;
@@ -65,7 +77,7 @@ void drawStatus() {
     snprintf(line, sizeof(line), "LAST:%s #%lu", lastSource.c_str(),
              static_cast<unsigned long>(stats.lastRxSequence));
   } else {
-    snprintf(line, sizeof(line), "Listening... SF%u BW%.0f", RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ);
+    snprintf(line, sizeof(line), "Listening SF%u BW%.0f", RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ);
   }
   display.drawStr(0, 61, line);
   display.sendBuffer();
@@ -77,6 +89,13 @@ void startReceive() {
     Serial.printf("[RF] startReceive failed: %d\n", state);
     stats.crcOrRxErrors++;
   }
+}
+
+void scheduleNextTx() {
+  // A little random jitter prevents two boards booted together from repeatedly
+  // transmitting on top of each other forever.
+  const uint32_t jitter = esp_random() % 501;
+  nextTxAt = millis() + TEST_TX_INTERVAL_MS + jitter;
 }
 
 void transmitTestPacket() {
@@ -95,6 +114,7 @@ void transmitTestPacket() {
 
   radio.setDio1Action(setFlag);
   startReceive();
+  scheduleNextTx();
 }
 
 void handleReceive() {
@@ -122,7 +142,6 @@ void handleReceive() {
     return;
   }
 
-  // Ignore our own packet if RF coupling or a future relay ever reflects it back.
   if (source == nodeId) {
     Serial.printf("[RX] self packet ignored #%lu\n", static_cast<unsigned long>(sequence));
     startReceive();
@@ -156,7 +175,13 @@ void setup() {
 
   nodeId = makeNodeId();
 
+  // Heltec V3 Vext is active-low and powers the onboard OLED rail.
+  pinMode(PIN_VEXT, OUTPUT);
+  digitalWrite(PIN_VEXT, LOW);
+  delay(20);
+
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
+  display.setI2CAddress(OLED_ADDR << 1);
   display.begin();
   showBoot("Starting...", nodeId.c_str());
 
@@ -170,7 +195,9 @@ void setup() {
   loraSpi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
 
   showBoot("Initializing SX1262", nodeId.c_str());
-  int16_t state = radio.begin(
+  radio.tcxoVoltage = RF_TCXO_VOLTAGE;
+
+  const int16_t state = radio.begin(
       RF_FREQUENCY_MHZ,
       RF_BANDWIDTH_KHZ,
       RF_SPREADING_FACTOR,
@@ -178,23 +205,25 @@ void setup() {
       RF_SYNC_WORD,
       RF_TX_POWER_DBM,
       RF_PREAMBLE_LEN,
-      0.0,
+      RF_TCXO_VOLTAGE,
       false);
 
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("[FATAL] SX1262 begin failed: %d\n", state);
-    showBoot("SX1262 FAILED", String(state).c_str());
+    const String code = String(state);
+    showBoot("SX1262 FAILED", code.c_str());
     while (true) delay(1000);
   }
 
   radioOk = true;
   radio.setDio1Action(setFlag);
   startReceive();
+  scheduleNextTx();
 
-  Serial.printf("[RF] SX1262 OK %.3f MHz SF%u BW%.0f CR4/%u TX %d dBm\n",
+  Serial.printf("[RF] SX1262 OK %.3f MHz SF%u BW%.0f CR4/%u TX %d dBm TCXO %.1f V\n",
                 RF_FREQUENCY_MHZ, RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ,
-                RF_CODING_RATE, RF_TX_POWER_DBM);
-  Serial.println("[RF] Each node sends one numbered test packet every 5 seconds.");
+                RF_CODING_RATE, RF_TX_POWER_DBM, RF_TCXO_VOLTAGE);
+  Serial.println("[RF] Each node sends a numbered test packet about every 5 seconds.");
   Serial.println("[RF] Move the nodes apart and watch RSSI/SNR/missed counters.");
 
   drawStatus();
@@ -208,8 +237,7 @@ void loop() {
   }
 
   const uint32_t now = millis();
-  if (now - lastTxAt >= TEST_TX_INTERVAL_MS) {
-    lastTxAt = now;
+  if (static_cast<int32_t>(now - nextTxAt) >= 0) {
     transmitTestPacket();
   }
 

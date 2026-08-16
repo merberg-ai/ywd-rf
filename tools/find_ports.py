@@ -4,15 +4,18 @@ import subprocess
 import sys
 
 
+def pio(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "platformio", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def main() -> int:
     try:
-        proc = subprocess.run(
-            ["pio", "device", "list", "--json-output"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        devices = json.loads(proc.stdout or "[]")
+        devices = json.loads(pio("device", "list", "--json-output").stdout or "[]")
     except Exception as exc:
         print(f"Unable to query PlatformIO serial devices: {exc}")
         return 1
