@@ -51,7 +51,13 @@ void debugPrintf(const char* format, ...) {
 
 void initDebugChannels() {
   pinMode(kStatusLedPin, OUTPUT);
+
+  // Earliest possible visual proof that setup() was entered. This happens
+  // before either serial transport is initialized.
+  setStatusLed(true);
+  delay(180);
   setStatusLed(false);
+  delay(80);
 
   // Bring up both possible development-console paths. Do not wait for either
   // one to connect; a disconnected USB CDC host must never stall boot.
@@ -114,6 +120,9 @@ void printBootDiagnostics() {
 }
 }  // namespace
 
+String nodeId;
+
+#if !YWD_RF_DIAGNOSTIC
 SPIClass loraSpi(FSPI);
 SPISettings loraSpiSettings(2000000, MSBFIRST, SPI_MODE0);
 SX1262 radio = new Module(
@@ -131,7 +140,6 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(
     PIN_OLED_SDA);
 
 RfStats stats;
-String nodeId;
 String lastSource = "-";
 uint32_t txSequence = 0;
 uint32_t nextTxAt = 0;
@@ -269,6 +277,7 @@ void handleReceive() {
 
   startReceive();
 }
+#endif
 
 void setup() {
   initDebugChannels();
@@ -279,10 +288,10 @@ void setup() {
   debugPrintf("[BOOT:1] application entered, node %s\n", nodeId.c_str());
 
 #if YWD_RF_DIAGNOSTIC
-  // This image proves the ESP32 application can boot without touching any of
-  // the board-specific peripherals. A 2 Hz LED heartbeat plus messages on
-  // USB CDC and UART0 means the CPU/runtime are alive.
-  debugPrintf("[DIAG] Peripheral initialization intentionally skipped.\n");
+  // This image proves the ESP32 application can boot without even constructing
+  // the board-specific radio/display objects. A 2 Hz LED heartbeat plus text
+  // on USB CDC or UART0 means the CPU/runtime are alive.
+  debugPrintf("[DIAG] Peripheral objects and initialization are disabled.\n");
   debugPrintf("[DIAG] Expect the status LED to toggle every 500 ms.\n");
   debugPrintf("[DIAG] If this works, the failure is later in OLED/SPI/SX1262 bring-up.\n");
   return;
