@@ -17,6 +17,7 @@ echo   6. Flash + Serial Monitor
 echo   7. Serial Monitor Only
 echo   8. Clean Build
 echo   9. Recovery / Erase Flash
+echo  10. Flash Minimal Diagnostic Firmware
 echo.
 echo   Q. Quit
 echo.
@@ -31,6 +32,7 @@ if "%CHOICE%"=="6" call DEV.cmd
 if "%CHOICE%"=="7" call MONITOR.cmd
 if "%CHOICE%"=="8" call CLEAN.cmd
 if "%CHOICE%"=="9" call ERASE.cmd
+if "%CHOICE%"=="10" call DIAGNOSTIC.cmd
 if /I "%CHOICE%"=="Q" exit /b 0
 
 goto :menu
