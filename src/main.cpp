@@ -4,6 +4,7 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <esp_system.h>
+#include <stdarg.h>
 
 #include "config.h"
 #include "rf_lab.h"
@@ -12,7 +13,106 @@
 #define YWD_RF_VERSION "0.0.1-dev"
 #endif
 
+#ifndef YWD_RF_DIAGNOSTIC
+#define YWD_RF_DIAGNOSTIC 0
+#endif
+
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 35
+#endif
+
 using namespace ywd;
+
+namespace {
+constexpr uint32_t kDebugBaud = 115200;
+constexpr int kStatusLedPin = LED_BUILTIN;
+constexpr uint32_t kHeartbeatIntervalMs = 500;
+
+uint32_t lastHeartbeatAt = 0;
+bool heartbeatState = false;
+
+void setStatusLed(bool on) {
+  digitalWrite(kStatusLedPin, on ? HIGH : LOW);
+}
+
+void debugPrintf(const char* format, ...) {
+  char buffer[320];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+
+  // With ARDUINO_USB_CDC_ON_BOOT=1, Serial is the native USB CDC/JTAG
+  // console. Serial0 remains UART0, which covers clone boards that put a
+  // CH340/CP210x-style bridge on the USB connector instead.
+  Serial.print(buffer);
+  Serial0.print(buffer);
+}
+
+void initDebugChannels() {
+  pinMode(kStatusLedPin, OUTPUT);
+  setStatusLed(false);
+
+  // Bring up both possible development-console paths. Do not wait for either
+  // one to connect; a disconnected USB CDC host must never stall boot.
+  Serial0.begin(kDebugBaud);
+  Serial.begin(kDebugBaud);
+  Serial.setDebugOutput(true);
+  delay(100);
+}
+
+void pulseBootStage(uint8_t stage) {
+  // One-time visual breadcrumbs during boot. If serial is unavailable, reset
+  // the board and count the pulses to see the last stage reached.
+  for (uint8_t i = 0; i < stage; ++i) {
+    setStatusLed(true);
+    delay(90);
+    setStatusLed(false);
+    delay(110);
+  }
+  delay(250);
+}
+
+[[noreturn]] void fatalBlink(uint8_t code) {
+  // Repeating LED error code. A long gap separates groups.
+  while (true) {
+    for (uint8_t i = 0; i < code; ++i) {
+      setStatusLed(true);
+      delay(180);
+      setStatusLed(false);
+      delay(180);
+    }
+    delay(1400);
+  }
+}
+
+void updateHeartbeat() {
+  const uint32_t now = millis();
+  if (now - lastHeartbeatAt >= kHeartbeatIntervalMs) {
+    lastHeartbeatAt = now;
+    heartbeatState = !heartbeatState;
+    setStatusLed(heartbeatState);
+  }
+}
+
+void printBootDiagnostics() {
+  debugPrintf("\n================================================\n");
+  debugPrintf(" YWD-RF %s - boot diagnostics\n", YWD_RF_VERSION);
+  debugPrintf("================================================\n");
+  debugPrintf("[BOOT] reset reason: %d\n", static_cast<int>(esp_reset_reason()));
+  debugPrintf("[BOOT] CPU: %u MHz\n", ESP.getCpuFreqMHz());
+  debugPrintf("[BOOT] flash: %u bytes\n", ESP.getFlashChipSize());
+  debugPrintf("[BOOT] free heap: %u bytes\n", ESP.getFreeHeap());
+  debugPrintf("[BOOT] USB CDC console: Serial\n");
+  debugPrintf("[BOOT] UART0 console: Serial0 @ %lu baud\n",
+              static_cast<unsigned long>(kDebugBaud));
+#if YWD_RF_DIAGNOSTIC
+  debugPrintf("[BOOT] mode: MINIMAL DIAGNOSTIC (OLED/RADIO/SPI disabled)\n");
+#else
+  debugPrintf("[BOOT] mode: RF LAB\n");
+#endif
+}
+}  // namespace
 
 SPIClass loraSpi(FSPI);
 SPISettings loraSpiSettings(2000000, MSBFIRST, SPI_MODE0);
@@ -87,7 +187,7 @@ void drawStatus() {
 void startReceive() {
   const int16_t state = radio.startReceive();
   if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("[RF] startReceive failed: %d\n", state);
+    debugPrintf("[RF] startReceive failed: %d\n", state);
     stats.crcOrRxErrors++;
   }
 }
@@ -101,15 +201,15 @@ void scheduleNextTx() {
 
 void transmitTestPacket() {
   String payload = makeTestPayload(nodeId, ++txSequence);
-  Serial.printf("[TX] #%lu %s\n", static_cast<unsigned long>(txSequence), payload.c_str());
+  debugPrintf("[TX] #%lu %s\n", static_cast<unsigned long>(txSequence), payload.c_str());
 
   radio.clearDio1Action();
   const int16_t state = radio.transmit(payload);
   if (state == RADIOLIB_ERR_NONE) {
     stats.txCount++;
-    Serial.printf("[TX] OK  %.1f ms airtime\n", radio.getTimeOnAir(payload.length()) / 1000.0f);
+    debugPrintf("[TX] OK  %.1f ms airtime\n", radio.getTimeOnAir(payload.length()) / 1000.0f);
   } else {
-    Serial.printf("[TX] ERROR %d\n", state);
+    debugPrintf("[TX] ERROR %d\n", state);
     stats.crcOrRxErrors++;
   }
 
@@ -124,7 +224,7 @@ void handleReceive() {
   String payload;
   const int16_t state = radio.readData(payload);
   if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("[RX] ERROR %d\n", state);
+    debugPrintf("[RX] ERROR %d\n", state);
     stats.crcOrRxErrors++;
     startReceive();
     return;
@@ -137,14 +237,14 @@ void handleReceive() {
   String source;
   uint32_t sequence = 0;
   if (!parseTestPayload(payload, source, sequence)) {
-    Serial.printf("[RX] FOREIGN/UNKNOWN RSSI %.1f SNR %.1f: %s\n",
-                  stats.lastRssi, stats.lastSnr, payload.c_str());
+    debugPrintf("[RX] FOREIGN/UNKNOWN RSSI %.1f SNR %.1f: %s\n",
+                stats.lastRssi, stats.lastSnr, payload.c_str());
     startReceive();
     return;
   }
 
   if (source == nodeId) {
-    Serial.printf("[RX] self packet ignored #%lu\n", static_cast<unsigned long>(sequence));
+    debugPrintf("[RX] self packet ignored #%lu\n", static_cast<unsigned long>(sequence));
     startReceive();
     return;
   }
@@ -163,38 +263,55 @@ void handleReceive() {
   stats.lastRxSequence = sequence;
   stats.haveLastRxSequence = true;
 
-  Serial.printf("[RX] %s #%lu RSSI %.1f dBm SNR %.1f dB\n",
-                source.c_str(), static_cast<unsigned long>(sequence),
-                stats.lastRssi, stats.lastSnr);
+  debugPrintf("[RX] %s #%lu RSSI %.1f dBm SNR %.1f dB\n",
+              source.c_str(), static_cast<unsigned long>(sequence),
+              stats.lastRssi, stats.lastSnr);
 
   startReceive();
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(1200);
+  initDebugChannels();
+  pulseBootStage(1);
+  printBootDiagnostics();
 
   nodeId = makeNodeId();
+  debugPrintf("[BOOT:1] application entered, node %s\n", nodeId.c_str());
+
+#if YWD_RF_DIAGNOSTIC
+  // This image proves the ESP32 application can boot without touching any of
+  // the board-specific peripherals. A 2 Hz LED heartbeat plus messages on
+  // USB CDC and UART0 means the CPU/runtime are alive.
+  debugPrintf("[DIAG] Peripheral initialization intentionally skipped.\n");
+  debugPrintf("[DIAG] Expect the status LED to toggle every 500 ms.\n");
+  debugPrintf("[DIAG] If this works, the failure is later in OLED/SPI/SX1262 bring-up.\n");
+  return;
+#else
+  pulseBootStage(2);
+  debugPrintf("[BOOT:2] enabling Vext/OLED power on GPIO %d\n", PIN_VEXT);
 
   // Heltec V3 Vext is active-low and powers the onboard OLED rail.
   pinMode(PIN_VEXT, OUTPUT);
   digitalWrite(PIN_VEXT, LOW);
   delay(20);
 
+  pulseBootStage(3);
+  debugPrintf("[BOOT:3] starting I2C/OLED SDA=%d SCL=%d RST=%d\n",
+              PIN_OLED_SDA, PIN_OLED_SCL, PIN_OLED_RST);
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   display.setI2CAddress(OLED_ADDR << 1);
   display.begin();
   showBoot("Starting...", nodeId.c_str());
+  debugPrintf("[BOOT:3] OLED initialization returned\n");
 
-  Serial.println();
-  Serial.println("================================================");
-  Serial.printf(" YWD-RF %s - RF Lab\n", YWD_RF_VERSION);
-  Serial.println("================================================");
-  Serial.printf("Node: %s\n", nodeId.c_str());
-  Serial.printf("CPU: %u MHz, Flash: %u bytes\n", ESP.getCpuFreqMHz(), ESP.getFlashChipSize());
-
+  pulseBootStage(4);
+  debugPrintf("[BOOT:4] starting LoRa SPI SCK=%d MISO=%d MOSI=%d NSS=%d\n",
+              PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
   loraSpi.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
 
+  pulseBootStage(5);
+  debugPrintf("[BOOT:5] initializing SX1262 DIO1=%d RST=%d BUSY=%d\n",
+              PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
   showBoot("Initializing SX1262", nodeId.c_str());
   radio.tcxoVoltage = RF_TCXO_VOLTAGE;
 
@@ -210,10 +327,10 @@ void setup() {
       false);
 
   if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("[FATAL] SX1262 begin failed: %d\n", state);
+    debugPrintf("[FATAL:6] SX1262 begin failed: %d\n", state);
     const String code = String(state);
     showBoot("SX1262 FAILED", code.c_str());
-    while (true) delay(1000);
+    fatalBlink(6);
   }
 
   radioOk = true;
@@ -221,16 +338,33 @@ void setup() {
   startReceive();
   scheduleNextTx();
 
-  Serial.printf("[RF] SX1262 OK %.3f MHz SF%u BW%.0f CR4/%u TX %d dBm TCXO %.1f V\n",
-                RF_FREQUENCY_MHZ, RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ,
-                RF_CODING_RATE, RF_TX_POWER_DBM, RF_TCXO_VOLTAGE);
-  Serial.println("[RF] Each node sends a numbered test packet about every 5 seconds.");
-  Serial.println("[RF] Move the nodes apart and watch RSSI/SNR/missed counters.");
+  debugPrintf("[BOOT:6] SX1262 initialized successfully\n");
+  debugPrintf("[RF] SX1262 OK %.3f MHz SF%u BW%.0f CR4/%u TX %d dBm TCXO %.1f V\n",
+              RF_FREQUENCY_MHZ, RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ,
+              RF_CODING_RATE, RF_TX_POWER_DBM, RF_TCXO_VOLTAGE);
+  debugPrintf("[RF] Each node sends a numbered test packet about every 5 seconds.\n");
+  debugPrintf("[RF] Move the nodes apart and watch RSSI/SNR/missed counters.\n");
 
   drawStatus();
+#endif
 }
 
 void loop() {
+  updateHeartbeat();
+
+#if YWD_RF_DIAGNOSTIC
+  static uint32_t lastDiagnosticAt = 0;
+  const uint32_t now = millis();
+  if (now - lastDiagnosticAt >= 2000) {
+    lastDiagnosticAt = now;
+    debugPrintf("[DIAG] alive uptime=%lu ms heap=%u reset=%d\n",
+                static_cast<unsigned long>(now),
+                ESP.getFreeHeap(),
+                static_cast<int>(esp_reset_reason()));
+  }
+  delay(5);
+  return;
+#else
   if (!radioOk) return;
 
   if (receivedFlag) {
@@ -248,4 +382,5 @@ void loop() {
   }
 
   delay(5);
+#endif
 }
