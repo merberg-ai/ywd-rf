@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <U8g2lib.h>
 #include <Wire.h>
+#include <esp_sleep.h>
 #include <esp_system.h>
 #include <stdarg.h>
 
@@ -291,7 +292,45 @@ void printLabHelp() {
   debugPrintf("  t = TXONLY  transmit test packets, never listen\n");
   debugPrintf("  r = RXONLY  continuous receive, never transmit\n");
   debugPrintf("  s = STATUS  print detailed RF counters/state\n");
+  debugPrintf("  p = POWER   radio/OLED off + ESP32 deep sleep\n");
   debugPrintf("  h = HELP\n\n");
+}
+
+[[noreturn]] void powerDownDevice() {
+  debugPrintf("\n[POWER] Power-down requested.\n");
+  debugPrintf("[POWER] SX1262 -> sleep, OLED/Vext -> off, ESP32-S3 -> deep sleep.\n");
+  debugPrintf("[POWER] Wake with RESET button or a power cycle.\n");
+
+  receivedFlag = false;
+  receivingArmed = false;
+  nextTxAt = 0;
+  radio.clearDio1Action();
+
+  if (displayOk) {
+    display.clearBuffer();
+    display.setFont(u8g2_font_6x10_tf);
+    display.drawStr(0, 18, "YWD-RF");
+    display.drawStr(0, 36, "POWERING DOWN");
+    display.drawStr(0, 54, "RESET TO WAKE");
+    display.sendBuffer();
+    delay(250);
+    display.setPowerSave(1);
+  }
+
+  const int16_t sleepState = radio.sleep();
+  debugPrintf("[POWER] SX1262 sleep state=%d\n", sleepState);
+  delay(100);
+
+  // Vext is active-low. HIGH removes power from the onboard OLED rail.
+  digitalWrite(PIN_VEXT, HIGH);
+  setStatusLed(false);
+
+  debugPrintf("[POWER] Entering deep sleep now.\n");
+  delay(150);
+  esp_deep_sleep_start();
+
+  // esp_deep_sleep_start() does not return, but keep the compiler honest.
+  while (true) delay(1000);
 }
 
 void setLabMode(LabMode mode) {
@@ -327,6 +366,7 @@ void handleCommand(char c) {
     case 't': case 'T': setLabMode(LabMode::TxOnly); break;
     case 'r': case 'R': setLabMode(LabMode::RxOnly); break;
     case 's': case 'S': printRfStatus(); break;
+    case 'p': case 'P': powerDownDevice(); break;
     case 'h': case 'H': printLabHelp(); break;
     default:
       debugPrintf("[CMD] Unknown '%c'. Press h for help.\n", c);
@@ -407,10 +447,10 @@ void handleReceive(bool fromDio1Poll = false) {
   }
 
   lastSource = source;
-  stats.lastRxSequence = sequence;
 
   if (source == nodeId) {
     stats.selfPacketCount++;
+    stats.lastRxSequence = sequence;
     debugPrintf("[RX] SELF-ID packet %s #%lu RSSI %.1f SNR %.1f\n",
                 source.c_str(), static_cast<unsigned long>(sequence),
                 stats.lastRssi, stats.lastSnr);
