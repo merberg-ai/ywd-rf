@@ -146,10 +146,31 @@ uint32_t nextTxAt = 0;
 uint32_t lastDisplayAt = 0;
 volatile bool receivedFlag = false;
 bool radioOk = false;
+bool displayOk = false;
 
 void setFlag() { receivedFlag = true; }
 
+void resetOled() {
+  // Heltec V3-class boards power the OLED from Vext and expose the SSD1306
+  // reset line on GPIO21. Explicitly release/reset it before any I2C access.
+  pinMode(PIN_OLED_RST, OUTPUT);
+  digitalWrite(PIN_OLED_RST, HIGH);
+  delay(1);
+  digitalWrite(PIN_OLED_RST, LOW);
+  delay(20);
+  digitalWrite(PIN_OLED_RST, HIGH);
+  delay(20);
+}
+
+bool oledAddressResponds() {
+  Wire.beginTransmission(OLED_ADDR);
+  const uint8_t result = Wire.endTransmission(true);
+  debugPrintf("[BOOT:3] OLED probe 0x%02X result=%u\n", OLED_ADDR, result);
+  return result == 0;
+}
+
 void showBoot(const char* line1, const char* line2 = "") {
+  if (!displayOk) return;
   display.clearBuffer();
   display.setFont(u8g2_font_6x10_tf);
   display.drawStr(0, 12, "YWD-RF RF LAB");
@@ -159,6 +180,8 @@ void showBoot(const char* line1, const char* line2 = "") {
 }
 
 void drawStatus() {
+  if (!displayOk) return;
+
   display.clearBuffer();
   display.setFont(u8g2_font_5x8_tf);
 
@@ -302,16 +325,28 @@ void setup() {
   // Heltec V3 Vext is active-low and powers the onboard OLED rail.
   pinMode(PIN_VEXT, OUTPUT);
   digitalWrite(PIN_VEXT, LOW);
-  delay(20);
+  delay(100);
 
   pulseBootStage(3);
-  debugPrintf("[BOOT:3] starting I2C/OLED SDA=%d SCL=%d RST=%d\n",
-              PIN_OLED_SDA, PIN_OLED_SCL, PIN_OLED_RST);
-  Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  display.setI2CAddress(OLED_ADDR << 1);
-  display.begin();
-  showBoot("Starting...", nodeId.c_str());
-  debugPrintf("[BOOT:3] OLED initialization returned\n");
+  debugPrintf("[BOOT:3] resetting OLED on GPIO %d\n", PIN_OLED_RST);
+  resetOled();
+
+  debugPrintf("[BOOT:3] starting I2C SDA=%d SCL=%d @ 100 kHz timeout=50 ms\n",
+              PIN_OLED_SDA, PIN_OLED_SCL);
+  Wire.setTimeOut(50);
+  const bool wireOk = Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL, 100000);
+  debugPrintf("[BOOT:3] Wire.begin returned %s\n", wireOk ? "true" : "false");
+
+  if (wireOk && oledAddressResponds()) {
+    debugPrintf("[BOOT:3] OLED ACKed; calling U8g2 begin()\n");
+    display.setI2CAddress(OLED_ADDR << 1);
+    display.begin();
+    displayOk = true;
+    showBoot("Starting...", nodeId.c_str());
+    debugPrintf("[BOOT:3] OLED initialization returned successfully\n");
+  } else {
+    debugPrintf("[WARN] OLED unavailable; continuing RF Lab headless.\n");
+  }
 
   pulseBootStage(4);
   debugPrintf("[BOOT:4] starting LoRa SPI SCK=%d MISO=%d MOSI=%d NSS=%d\n",
@@ -348,6 +383,7 @@ void setup() {
   scheduleNextTx();
 
   debugPrintf("[BOOT:6] SX1262 initialized successfully\n");
+  debugPrintf("[BOOT:6] OLED status: %s\n", displayOk ? "ONLINE" : "HEADLESS");
   debugPrintf("[RF] SX1262 OK %.3f MHz SF%u BW%.0f CR4/%u TX %d dBm TCXO %.1f V\n",
               RF_FREQUENCY_MHZ, RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ,
               RF_CODING_RATE, RF_TX_POWER_DBM, RF_TCXO_VOLTAGE);
