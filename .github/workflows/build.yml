@@ -22,7 +22,7 @@ jobs:
         run: pip install platformio
 
       - name: Build firmware
-        run: pio run -e ywd_rf -e ywd_rf_diag
+        run: pio run -e ywd_rf -e ywd_rf_diag -e ywd_rf_probe
 
       - name: Upload firmware artifacts
         if: success()
@@ -36,4 +36,7 @@ jobs:
             .pio/build/ywd_rf_diag/firmware.bin
             .pio/build/ywd_rf_diag/bootloader.bin
             .pio/build/ywd_rf_diag/partitions.bin
+            .pio/build/ywd_rf_probe/firmware.bin
+            .pio/build/ywd_rf_probe/bootloader.bin
+            .pio/build/ywd_rf_probe/partitions.bin
           if-no-files-found: warn
