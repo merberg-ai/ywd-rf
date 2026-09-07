@@ -27,6 +27,7 @@ namespace {
 constexpr uint32_t kDebugBaud = 115200;
 constexpr int kStatusLedPin = LED_BUILTIN;
 constexpr uint32_t kHeartbeatIntervalMs = 500;
+constexpr uint32_t kTxJitterMs = 4000;
 
 uint32_t lastHeartbeatAt = 0;
 bool heartbeatState = false;
@@ -36,7 +37,7 @@ void setStatusLed(bool on) {
 }
 
 void debugPrintf(const char* format, ...) {
-  char buffer[320];
+  char buffer[384];
   va_list args;
   va_start(args, format);
   vsnprintf(buffer, sizeof(buffer), format, args);
@@ -59,8 +60,6 @@ void initDebugChannels() {
   setStatusLed(false);
   delay(80);
 
-  // Bring up both possible development-console paths. Do not wait for either
-  // one to connect; a disconnected USB CDC host must never stall boot.
   Serial0.begin(kDebugBaud);
   Serial.begin(kDebugBaud);
   Serial.setDebugOutput(true);
@@ -68,8 +67,6 @@ void initDebugChannels() {
 }
 
 void pulseBootStage(uint8_t stage) {
-  // One-time visual breadcrumbs during boot. If serial is unavailable, reset
-  // the board and count the pulses to see the last stage reached.
   for (uint8_t i = 0; i < stage; ++i) {
     setStatusLed(true);
     delay(90);
@@ -80,7 +77,6 @@ void pulseBootStage(uint8_t stage) {
 }
 
 [[noreturn]] void fatalBlink(uint8_t code) {
-  // Repeating LED error code. A long gap separates groups.
   while (true) {
     for (uint8_t i = 0; i < code; ++i) {
       setStatusLed(true);
@@ -142,6 +138,12 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(
     PIN_OLED_SCL,
     PIN_OLED_SDA);
 
+enum class LabMode : uint8_t {
+  Auto,
+  TxOnly,
+  RxOnly,
+};
+
 RfStats stats;
 String lastSource = "-";
 uint32_t txSequence = 0;
@@ -150,12 +152,20 @@ uint32_t lastDisplayAt = 0;
 volatile bool receivedFlag = false;
 bool radioOk = false;
 bool displayOk = false;
+bool receivingArmed = false;
+LabMode labMode = LabMode::Auto;
+
+const char* labModeName() {
+  switch (labMode) {
+    case LabMode::TxOnly: return "TXONLY";
+    case LabMode::RxOnly: return "RXONLY";
+    default: return "AUTO";
+  }
+}
 
 void setFlag() { receivedFlag = true; }
 
 void resetOled() {
-  // Heltec V3-class boards power the OLED from Vext and expose the SSD1306
-  // reset line on GPIO21. Explicitly release/reset it before any I2C access.
   pinMode(PIN_OLED_RST, OUTPUT);
   digitalWrite(PIN_OLED_RST, HIGH);
   delay(1);
@@ -192,78 +202,195 @@ void drawStatus() {
   snprintf(line, sizeof(line), "YWD-RF %s", YWD_RF_VERSION);
   display.drawStr(0, 8, line);
 
-  snprintf(line, sizeof(line), "%s  %.3f MHz", nodeId.c_str(), RF_FREQUENCY_MHZ);
+  snprintf(line, sizeof(line), "%s %s", nodeId.c_str(), labModeName());
   display.drawStr(0, 18, line);
 
-  snprintf(line, sizeof(line), "TX:%lu RX:%lu ERR:%lu",
+  snprintf(line, sizeof(line), "TX:%lu RAW:%lu RX:%lu",
            static_cast<unsigned long>(stats.txCount),
-           static_cast<unsigned long>(stats.rxCount),
-           static_cast<unsigned long>(stats.crcOrRxErrors));
+           static_cast<unsigned long>(stats.rawRxCount),
+           static_cast<unsigned long>(stats.rxCount));
   display.drawStr(0, 30, line);
 
-  snprintf(line, sizeof(line), "MISS:%lu DUP:%lu",
-           static_cast<unsigned long>(stats.missedSequenceEstimate),
-           static_cast<unsigned long>(stats.duplicateCount));
+  snprintf(line, sizeof(line), "ARM:%lu AE:%lu D1:%lu",
+           static_cast<unsigned long>(stats.rxArmCount),
+           static_cast<unsigned long>(stats.rxArmErrors),
+           static_cast<unsigned long>(stats.dio1PollHits));
   display.drawStr(0, 40, line);
 
-  if (stats.rxCount > 0) {
+  if (stats.rawRxCount > 0) {
     snprintf(line, sizeof(line), "RSSI:%4.0f SNR:%4.1f", stats.lastRssi, stats.lastSnr);
     display.drawStr(0, 50, line);
     snprintf(line, sizeof(line), "LAST:%s #%lu", lastSource.c_str(),
              static_cast<unsigned long>(stats.lastRxSequence));
   } else {
-    snprintf(line, sizeof(line), "Listening SF%u BW%.0f", RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ);
+    snprintf(line, sizeof(line), "SELF:%lu ERR:%lu",
+             static_cast<unsigned long>(stats.selfPacketCount),
+             static_cast<unsigned long>(stats.crcOrRxErrors));
+    display.drawStr(0, 50, line);
+    snprintf(line, sizeof(line), "SF%u BW%.0f DIO1:%d", RF_SPREADING_FACTOR,
+             RF_BANDWIDTH_KHZ, digitalRead(PIN_LORA_DIO1));
   }
   display.drawStr(0, 61, line);
   display.sendBuffer();
 }
 
-void startReceive() {
+void scheduleNextTx(uint32_t baseDelayMs = TEST_TX_INTERVAL_MS) {
+  // Large per-packet jitter makes repeated collisions between two AUTO nodes
+  // extremely unlikely even if they boot at nearly the same time.
+  const uint32_t jitter = esp_random() % (kTxJitterMs + 1);
+  nextTxAt = millis() + baseDelayMs + jitter;
+}
+
+void startReceive(bool verbose = false) {
+  receivedFlag = false;
   const int16_t state = radio.startReceive();
-  if (state != RADIOLIB_ERR_NONE) {
-    debugPrintf("[RF] startReceive failed: %d\n", state);
+  stats.rxArmCount++;
+  receivingArmed = state == RADIOLIB_ERR_NONE;
+
+  if (!receivingArmed) {
+    stats.rxArmErrors++;
     stats.crcOrRxErrors++;
+  }
+
+  if (verbose || !receivingArmed) {
+    debugPrintf("[RXARM] #%lu state=%d DIO1=%d mode=%s\n",
+                static_cast<unsigned long>(stats.rxArmCount), state,
+                digitalRead(PIN_LORA_DIO1), labModeName());
   }
 }
 
-void scheduleNextTx() {
-  // A little random jitter prevents two boards booted together from repeatedly
-  // transmitting on top of each other forever.
-  const uint32_t jitter = esp_random() % 501;
-  nextTxAt = millis() + TEST_TX_INTERVAL_MS + jitter;
+void printRfStatus() {
+  const uint64_t mac = ESP.getEfuseMac();
+  debugPrintf("\n[STATUS] node=%s mode=%s eFuse=%04X%08lX\n",
+              nodeId.c_str(), labModeName(),
+              static_cast<unsigned int>((mac >> 32) & 0xFFFFULL),
+              static_cast<unsigned long>(mac & 0xFFFFFFFFULL));
+  debugPrintf("[STATUS] TX=%lu RAW_RX=%lu RX=%lu SELF=%lu FOREIGN=%lu ERR=%lu\n",
+              static_cast<unsigned long>(stats.txCount),
+              static_cast<unsigned long>(stats.rawRxCount),
+              static_cast<unsigned long>(stats.rxCount),
+              static_cast<unsigned long>(stats.selfPacketCount),
+              static_cast<unsigned long>(stats.foreignPacketCount),
+              static_cast<unsigned long>(stats.crcOrRxErrors));
+  debugPrintf("[STATUS] RX_ARM=%lu ARM_ERR=%lu armed=%s DIO1=%d poll_hits=%lu\n",
+              static_cast<unsigned long>(stats.rxArmCount),
+              static_cast<unsigned long>(stats.rxArmErrors),
+              receivingArmed ? "YES" : "NO",
+              digitalRead(PIN_LORA_DIO1),
+              static_cast<unsigned long>(stats.dio1PollHits));
+  if (stats.rawRxCount > 0) {
+    debugPrintf("[STATUS] last=%s #%lu RSSI=%.1f SNR=%.1f\n",
+                lastSource.c_str(), static_cast<unsigned long>(stats.lastRxSequence),
+                stats.lastRssi, stats.lastSnr);
+  }
+}
+
+void printLabHelp() {
+  debugPrintf("\n[RF LAB] Runtime commands (single letter + Enter):\n");
+  debugPrintf("  a = AUTO    periodic TX + continuous RX\n");
+  debugPrintf("  t = TXONLY  transmit test packets, never listen\n");
+  debugPrintf("  r = RXONLY  continuous receive, never transmit\n");
+  debugPrintf("  s = STATUS  print detailed RF counters/state\n");
+  debugPrintf("  h = HELP\n\n");
+}
+
+void setLabMode(LabMode mode) {
+  labMode = mode;
+  receivedFlag = false;
+
+  if (labMode == LabMode::TxOnly) {
+    receivingArmed = false;
+    radio.clearDio1Action();
+    radio.standby();
+    scheduleNextTx(1000);
+    debugPrintf("[MODE] TXONLY: RX disabled; first TX scheduled shortly.\n");
+  } else {
+    radio.setDio1Action(setFlag);
+    startReceive(true);
+    if (labMode == LabMode::Auto) {
+      scheduleNextTx();
+      debugPrintf("[MODE] AUTO: RX armed; randomized periodic TX enabled.\n");
+    } else {
+      nextTxAt = 0;
+      debugPrintf("[MODE] RXONLY: continuous RX; TX completely disabled.\n");
+    }
+  }
+
+  drawStatus();
+}
+
+void handleCommand(char c) {
+  if (c == '\r' || c == '\n' || c == ' ' || c == '\t') return;
+
+  switch (c) {
+    case 'a': case 'A': setLabMode(LabMode::Auto); break;
+    case 't': case 'T': setLabMode(LabMode::TxOnly); break;
+    case 'r': case 'R': setLabMode(LabMode::RxOnly); break;
+    case 's': case 'S': printRfStatus(); break;
+    case 'h': case 'H': printLabHelp(); break;
+    default:
+      debugPrintf("[CMD] Unknown '%c'. Press h for help.\n", c);
+      break;
+  }
+}
+
+void pollSerialCommands() {
+  while (Serial.available() > 0) {
+    handleCommand(static_cast<char>(Serial.read()));
+  }
+  while (Serial0.available() > 0) {
+    handleCommand(static_cast<char>(Serial0.read()));
+  }
 }
 
 void transmitTestPacket() {
+  if (labMode == LabMode::RxOnly) return;
+
+  receivingArmed = false;
+  receivedFlag = false;
+  radio.clearDio1Action();
+
   String payload = makeTestPayload(nodeId, ++txSequence);
   debugPrintf("[TX] #%lu %s\n", static_cast<unsigned long>(txSequence), payload.c_str());
 
-  radio.clearDio1Action();
   const int16_t state = radio.transmit(payload);
   if (state == RADIOLIB_ERR_NONE) {
     stats.txCount++;
-    debugPrintf("[TX] OK  %.1f ms airtime\n", radio.getTimeOnAir(payload.length()) / 1000.0f);
+    debugPrintf("[TX] OK %.1f ms airtime\n", radio.getTimeOnAir(payload.length()) / 1000.0f);
   } else {
     debugPrintf("[TX] ERROR %d\n", state);
     stats.crcOrRxErrors++;
   }
 
-  radio.setDio1Action(setFlag);
-  startReceive();
+  if (labMode == LabMode::Auto) {
+    radio.setDio1Action(setFlag);
+    startReceive(false);
+  } else {
+    radio.standby();
+  }
+
   scheduleNextTx();
 }
 
-void handleReceive() {
+void handleReceive(bool fromDio1Poll = false) {
   receivedFlag = false;
+  receivingArmed = false;
+
+  if (fromDio1Poll) {
+    stats.dio1PollHits++;
+    debugPrintf("[RX] DIO1 polling fallback observed asserted IRQ.\n");
+  }
 
   String payload;
   const int16_t state = radio.readData(payload);
   if (state != RADIOLIB_ERR_NONE) {
     debugPrintf("[RX] ERROR %d\n", state);
     stats.crcOrRxErrors++;
-    startReceive();
+    if (labMode != LabMode::TxOnly) startReceive(false);
     return;
   }
 
+  stats.rawRxCount++;
   stats.lastRssi = radio.getRSSI();
   stats.lastSnr = radio.getSNR();
   stats.lastRxAtMs = millis();
@@ -271,20 +398,27 @@ void handleReceive() {
   String source;
   uint32_t sequence = 0;
   if (!parseTestPayload(payload, source, sequence)) {
-    debugPrintf("[RX] FOREIGN/UNKNOWN RSSI %.1f SNR %.1f: %s\n",
+    stats.foreignPacketCount++;
+    lastSource = "FOREIGN";
+    debugPrintf("[RX] RAW/FOREIGN RSSI %.1f SNR %.1f: %s\n",
                 stats.lastRssi, stats.lastSnr, payload.c_str());
-    startReceive();
+    if (labMode != LabMode::TxOnly) startReceive(false);
     return;
   }
 
+  lastSource = source;
+  stats.lastRxSequence = sequence;
+
   if (source == nodeId) {
-    debugPrintf("[RX] self packet ignored #%lu\n", static_cast<unsigned long>(sequence));
-    startReceive();
+    stats.selfPacketCount++;
+    debugPrintf("[RX] SELF-ID packet %s #%lu RSSI %.1f SNR %.1f\n",
+                source.c_str(), static_cast<unsigned long>(sequence),
+                stats.lastRssi, stats.lastSnr);
+    if (labMode != LabMode::TxOnly) startReceive(false);
     return;
   }
 
   stats.rxCount++;
-  lastSource = source;
 
   if (stats.haveLastRxSequence) {
     if (sequence == stats.lastRxSequence) {
@@ -297,11 +431,13 @@ void handleReceive() {
   stats.lastRxSequence = sequence;
   stats.haveLastRxSequence = true;
 
-  debugPrintf("[RX] %s #%lu RSSI %.1f dBm SNR %.1f dB\n",
+  debugPrintf("[RX] %s #%lu RSSI %.1f dBm SNR %.1f dB RAW=%lu RX=%lu\n",
               source.c_str(), static_cast<unsigned long>(sequence),
-              stats.lastRssi, stats.lastSnr);
+              stats.lastRssi, stats.lastSnr,
+              static_cast<unsigned long>(stats.rawRxCount),
+              static_cast<unsigned long>(stats.rxCount));
 
-  startReceive();
+  if (labMode != LabMode::TxOnly) startReceive(false);
 }
 #endif
 
@@ -314,9 +450,6 @@ void setup() {
   debugPrintf("[BOOT:1] application entered, node %s\n", nodeId.c_str());
 
 #if YWD_RF_DIAGNOSTIC
-  // This image proves the ESP32 application can boot without even constructing
-  // the board-specific radio/display objects. A 2 Hz LED heartbeat plus text
-  // on USB CDC or UART0 means the CPU/runtime are alive.
   debugPrintf("[DIAG] Peripheral objects and initialization are disabled.\n");
   debugPrintf("[DIAG] Expect the status LED to toggle every 500 ms.\n");
   debugPrintf("[DIAG] If this works, the failure is later in OLED/SPI/SX1262 bring-up.\n");
@@ -325,7 +458,6 @@ void setup() {
   pulseBootStage(2);
   debugPrintf("[BOOT:2] enabling Vext/OLED power on GPIO %d\n", PIN_VEXT);
 
-  // Heltec V3 Vext is active-low and powers the onboard OLED rail.
   pinMode(PIN_VEXT, OUTPUT);
   digitalWrite(PIN_VEXT, LOW);
   delay(100);
@@ -388,18 +520,31 @@ void setup() {
     fatalBlink(6);
   }
 
+  const int16_t switchState = radio.setDio2AsRfSwitch(true);
+  debugPrintf("[BOOT:5] DIO2 RF switch control state=%d\n", switchState);
+  if (switchState != RADIOLIB_ERR_NONE) {
+    stats.crcOrRxErrors++;
+  }
+
   radioOk = true;
   radio.setDio1Action(setFlag);
-  startReceive();
+  startReceive(true);
   scheduleNextTx();
 
+  const uint64_t mac = ESP.getEfuseMac();
   debugPrintf("[BOOT:6] SX1262 initialized successfully\n");
   debugPrintf("[BOOT:6] OLED status: %s\n", displayOk ? "ONLINE" : "HEADLESS");
+  debugPrintf("[RF] node=%s eFuse=%04X%08lX\n",
+              nodeId.c_str(),
+              static_cast<unsigned int>((mac >> 32) & 0xFFFFULL),
+              static_cast<unsigned long>(mac & 0xFFFFFFFFULL));
   debugPrintf("[RF] SX1262 OK %.3f MHz SF%u BW%.0f CR4/%u TX %d dBm TCXO %.1f V\n",
               RF_FREQUENCY_MHZ, RF_SPREADING_FACTOR, RF_BANDWIDTH_KHZ,
               RF_CODING_RATE, RF_TX_POWER_DBM, RF_TCXO_VOLTAGE);
-  debugPrintf("[RF] Each node sends a numbered test packet about every 5 seconds.\n");
-  debugPrintf("[RF] Move the nodes apart and watch RSSI/SNR/missed counters.\n");
+  debugPrintf("[RF] AUTO TX spacing: %lu..%lu ms. RX is armed between packets.\n",
+              static_cast<unsigned long>(TEST_TX_INTERVAL_MS),
+              static_cast<unsigned long>(TEST_TX_INTERVAL_MS + kTxJitterMs));
+  printLabHelp();
 
   drawStatus();
 #endif
@@ -423,12 +568,16 @@ void loop() {
 #else
   if (!radioOk) return;
 
-  if (receivedFlag) {
-    handleReceive();
+  pollSerialCommands();
+
+  const bool dio1Polled = receivingArmed && digitalRead(PIN_LORA_DIO1) == HIGH;
+  if (receivedFlag || dio1Polled) {
+    handleReceive(dio1Polled && !receivedFlag);
   }
 
   const uint32_t now = millis();
-  if (static_cast<int32_t>(now - nextTxAt) >= 0) {
+  if (labMode != LabMode::RxOnly && nextTxAt != 0 &&
+      static_cast<int32_t>(now - nextTxAt) >= 0) {
     transmitTestPacket();
   }
 
