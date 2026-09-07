@@ -27,10 +27,11 @@
 - ESP32-S3 application boot, 8 MB flash, native USB serial, and stable heap.
 - SSD1306 power/reset path and I2C response at address `0x3C`.
 - SX1262 SPI/control pinout, RadioLib initialization (`state=0`), and standby operation without RF transmit.
-- Two boards boot the RF Lab firmware and report successful periodic transmit attempts; bidirectional receive qualification is the current test target.
+- Both development boards boot the RF Lab firmware, transmit successfully, and receive each other's YRF1 test packets bidirectionally.
+- Runtime power-down command successfully sleeps the radio, shuts down the display/Vext rail, and leaves the ESP32-S3 in deep sleep until reset or power cycle.
 
 ### Planned next
-- Confirm bidirectional RF Lab packets between the two development nodes and collect RSSI/SNR/loss data.
+- Run a sustained bidirectional RF Lab session and collect RSSI/SNR/loss data before freezing the 0.0.1-dev hardware baseline.
 - Add persistent runtime node naming.
 - Replace temporary text test frames with binary YRF1 framing.
 - Add ACK/retry and real text messaging.
