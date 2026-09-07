@@ -111,7 +111,7 @@ void probeI2cAndOled() {
   debugPrintf("[OLED:3] reset released HIGH; SDA=%d SCL=%d\n",
               digitalRead(PIN_OLED_SDA), digitalRead(PIN_OLED_SCL));
 
-  debugPrintf("[OLED:4] Starting Wire on SDA=%d SCL=%d @ 100 kHz, timeout 50 ms...\n",
+  debugPrintf("[OLED:4] Starting temporary Wire scan session on SDA=%d SCL=%d @ 100 kHz, timeout 50 ms...\n",
               PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.setTimeOut(50);
   const bool wireOk = Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL, 100000);
@@ -142,24 +142,37 @@ void probeI2cAndOled() {
   if (!oledFound) {
     debugPrintf("[OLED:STOP] Nothing ACKed at 0x%02X even after explicit reset; not calling U8g2 begin().\n",
                 OLED_ADDR);
+    Wire.end();
     return;
   }
 
-  debugPrintf("[OLED:6] Calling U8g2 SSD1306 begin() now. If output stops here, this call is the hang.\n");
+  // U8g2's HW-I2C backend calls Wire.begin() itself. End our temporary scan
+  // session first so the ESP32-S3 I2C controller is initialized only once by
+  // the library that will own it from this point onward.
+  debugPrintf("[OLED:6] Ending temporary Wire scan session before U8g2 takes ownership...\n");
+  Wire.end();
+  delay(30);
+  debugPrintf("[OLED:6] Wire.end returned; RST=%d SDA=%d SCL=%d\n",
+              digitalRead(PIN_OLED_RST), digitalRead(PIN_OLED_SDA), digitalRead(PIN_OLED_SCL));
+
+  debugPrintf("[OLED:7] Calling U8g2 begin with reset=NONE (already reset manually).\n");
+  debugPrintf("[OLED:7] U8g2 will initialize Wire exactly once on SDA=%d SCL=%d.\n",
+              PIN_OLED_SDA, PIN_OLED_SCL);
   static U8G2_SSD1306_128X64_NONAME_F_HW_I2C probeDisplay(
-      U8G2_R0, PIN_OLED_RST, PIN_OLED_SCL, PIN_OLED_SDA);
+      U8G2_R0, U8X8_PIN_NONE, PIN_OLED_SCL, PIN_OLED_SDA);
   probeDisplay.setI2CAddress(OLED_ADDR << 1);
+  probeDisplay.setBusClock(100000);
   probeDisplay.begin();
   oledInitialized = true;
-  debugPrintf("[OLED:6] U8g2 begin returned successfully.\n");
+  debugPrintf("[OLED:7] U8g2 begin returned successfully.\n");
 
   probeDisplay.clearBuffer();
   probeDisplay.setFont(u8g2_font_6x10_tf);
   probeDisplay.drawStr(0, 12, "YWD-RF PROBE");
   probeDisplay.drawStr(0, 30, "OLED: OK");
-  probeDisplay.drawStr(0, 48, "Serial: check log");
+  probeDisplay.drawStr(0, 48, "I2C HANDOFF: OK");
   probeDisplay.sendBuffer();
-  debugPrintf("[OLED:7] Test frame sent to display.\n");
+  debugPrintf("[OLED:8] Test frame sent to display.\n");
 }
 
 bool radioBusyStuckHigh() {
