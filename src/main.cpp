@@ -133,9 +133,12 @@ SX1262 radio = new Module(
     loraSpi,
     loraSpiSettings);
 
+// OLED reset is handled explicitly before probing. Giving U8g2 reset=NONE is
+// important on ESP32-S3: the probe temporarily owns Wire, then Wire.end() is
+// called before U8g2 takes ownership and initializes the bus exactly once.
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(
     U8G2_R0,
-    PIN_OLED_RST,
+    U8X8_PIN_NONE,
     PIN_OLED_SCL,
     PIN_OLED_SDA);
 
@@ -331,14 +334,22 @@ void setup() {
   debugPrintf("[BOOT:3] resetting OLED on GPIO %d\n", PIN_OLED_RST);
   resetOled();
 
-  debugPrintf("[BOOT:3] starting I2C SDA=%d SCL=%d @ 100 kHz timeout=50 ms\n",
+  debugPrintf("[BOOT:3] starting temporary I2C probe SDA=%d SCL=%d @ 100 kHz timeout=50 ms\n",
               PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.setTimeOut(50);
   const bool wireOk = Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL, 100000);
-  debugPrintf("[BOOT:3] Wire.begin returned %s\n", wireOk ? "true" : "false");
+  debugPrintf("[BOOT:3] probe Wire.begin returned %s\n", wireOk ? "true" : "false");
 
-  if (wireOk && oledAddressResponds()) {
-    debugPrintf("[BOOT:3] OLED ACKed; calling U8g2 begin()\n");
+  bool oledPresent = false;
+  if (wireOk) {
+    oledPresent = oledAddressResponds();
+    debugPrintf("[BOOT:3] ending temporary I2C probe before U8g2 ownership\n");
+    Wire.end();
+    delay(20);
+  }
+
+  if (oledPresent) {
+    debugPrintf("[BOOT:3] OLED ACKed; U8g2 taking clean I2C ownership with reset=NONE\n");
     display.setI2CAddress(OLED_ADDR << 1);
     display.begin();
     displayOk = true;
