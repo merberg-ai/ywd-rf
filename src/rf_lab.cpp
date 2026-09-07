@@ -6,8 +6,13 @@ namespace ywd {
 
 String makeNodeId() {
   const uint64_t mac = ESP.getEfuseMac();
-  char out[16];
-  snprintf(out, sizeof(out), "YWD-%04X", static_cast<uint16_t>(mac & 0xFFFF));
+
+  // Fold all 48 eFuse MAC bits into a compact 24-bit lab identifier. The old
+  // 16-bit suffix was unnecessarily collision-prone and could make a real
+  // packet from another board look like a self-packet during bring-up.
+  const uint32_t folded = static_cast<uint32_t>((mac ^ (mac >> 24)) & 0xFFFFFFULL);
+  char out[20];
+  snprintf(out, sizeof(out), "YWD-%06lX", static_cast<unsigned long>(folded));
   return String(out);
 }
 
