@@ -80,6 +80,18 @@ void printHeader() {
               PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI);
 }
 
+void resetOled() {
+  // Heltec V3-class boards power the OLED from Vext and expose the SSD1306
+  // reset line on GPIO21. The display will not ACK on I2C while held reset.
+  pinMode(PIN_OLED_RST, OUTPUT);
+  digitalWrite(PIN_OLED_RST, HIGH);
+  delay(1);
+  digitalWrite(PIN_OLED_RST, LOW);
+  delay(20);
+  digitalWrite(PIN_OLED_RST, HIGH);
+  delay(20);
+}
+
 void probeI2cAndOled() {
   debugPrintf("\n[OLED:1] Sampling I2C pins before Vext...\n");
   pinMode(PIN_OLED_SDA, INPUT_PULLUP);
@@ -94,46 +106,52 @@ void probeI2cAndOled() {
   debugPrintf("[OLED:2] after Vext: SDA=%d SCL=%d\n",
               digitalRead(PIN_OLED_SDA), digitalRead(PIN_OLED_SCL));
 
-  debugPrintf("[OLED:3] Starting Wire on SDA=%d SCL=%d @ 100 kHz, timeout 50 ms...\n",
+  debugPrintf("[OLED:3] Pulsing OLED reset GPIO %d HIGH->LOW->HIGH...\n", PIN_OLED_RST);
+  resetOled();
+  debugPrintf("[OLED:3] reset released HIGH; SDA=%d SCL=%d\n",
+              digitalRead(PIN_OLED_SDA), digitalRead(PIN_OLED_SCL));
+
+  debugPrintf("[OLED:4] Starting Wire on SDA=%d SCL=%d @ 100 kHz, timeout 50 ms...\n",
               PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.setTimeOut(50);
   const bool wireOk = Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL, 100000);
-  debugPrintf("[OLED:3] Wire.begin returned %s\n", wireOk ? "true" : "false");
+  debugPrintf("[OLED:4] Wire.begin returned %s\n", wireOk ? "true" : "false");
   if (!wireOk) {
     debugPrintf("[OLED:STOP] I2C controller did not initialize; skipping OLED library.\n");
     return;
   }
 
-  debugPrintf("[OLED:4] Scanning I2C addresses 0x08..0x77...\n");
+  debugPrintf("[OLED:5] Scanning I2C addresses 0x08..0x77 after reset release...\n");
   uint8_t foundCount = 0;
   for (uint8_t address = 0x08; address <= 0x77; ++address) {
     Wire.beginTransmission(address);
     const uint8_t result = Wire.endTransmission(true);
     if (result == 0) {
       ++foundCount;
-      debugPrintf("[OLED:4] ACK at 0x%02X%s\n",
+      debugPrintf("[OLED:5] ACK at 0x%02X%s\n",
                   address, address == OLED_ADDR ? "  <--- expected OLED" : "");
       if (address == OLED_ADDR) oledFound = true;
     } else if (result == 5) {
-      debugPrintf("[OLED:4] timeout while probing 0x%02X\n", address);
+      debugPrintf("[OLED:5] timeout while probing 0x%02X\n", address);
     }
     delay(1);
   }
-  debugPrintf("[OLED:4] scan complete: %u device(s), expected OLED %s\n",
+  debugPrintf("[OLED:5] scan complete: %u device(s), expected OLED %s\n",
               foundCount, oledFound ? "FOUND" : "NOT FOUND");
 
   if (!oledFound) {
-    debugPrintf("[OLED:STOP] Nothing ACKed at 0x%02X; not calling U8g2 begin().\n", OLED_ADDR);
+    debugPrintf("[OLED:STOP] Nothing ACKed at 0x%02X even after explicit reset; not calling U8g2 begin().\n",
+                OLED_ADDR);
     return;
   }
 
-  debugPrintf("[OLED:5] Calling U8g2 SSD1306 begin() now. If output stops here, this call is the hang.\n");
+  debugPrintf("[OLED:6] Calling U8g2 SSD1306 begin() now. If output stops here, this call is the hang.\n");
   static U8G2_SSD1306_128X64_NONAME_F_HW_I2C probeDisplay(
       U8G2_R0, PIN_OLED_RST, PIN_OLED_SCL, PIN_OLED_SDA);
   probeDisplay.setI2CAddress(OLED_ADDR << 1);
   probeDisplay.begin();
   oledInitialized = true;
-  debugPrintf("[OLED:5] U8g2 begin returned successfully.\n");
+  debugPrintf("[OLED:6] U8g2 begin returned successfully.\n");
 
   probeDisplay.clearBuffer();
   probeDisplay.setFont(u8g2_font_6x10_tf);
@@ -141,7 +159,7 @@ void probeI2cAndOled() {
   probeDisplay.drawStr(0, 30, "OLED: OK");
   probeDisplay.drawStr(0, 48, "Serial: check log");
   probeDisplay.sendBuffer();
-  debugPrintf("[OLED:6] Test frame sent to display.\n");
+  debugPrintf("[OLED:7] Test frame sent to display.\n");
 }
 
 bool radioBusyStuckHigh() {
@@ -213,7 +231,7 @@ void setup() {
   initDebug();
   printHeader();
 
-  debugPrintf("\n[PROBE] Stage A: Vext / I2C / OLED\n");
+  debugPrintf("\n[PROBE] Stage A: Vext / OLED reset / I2C / OLED\n");
   probeI2cAndOled();
 
   debugPrintf("\n[PROBE] Stage B: SX1262 control pins / SPI / RadioLib init\n");
@@ -238,10 +256,11 @@ void loop() {
   const uint32_t now = millis();
   if (now - lastReportAt >= 3000) {
     lastReportAt = now;
-    debugPrintf("[PROBE] alive uptime=%lu heap=%u SDA=%d SCL=%d BUSY=%d DIO1=%d\n",
+    debugPrintf("[PROBE] alive uptime=%lu heap=%u SDA=%d SCL=%d RST=%d BUSY=%d DIO1=%d\n",
                 static_cast<unsigned long>(now), ESP.getFreeHeap(),
                 digitalRead(PIN_OLED_SDA), digitalRead(PIN_OLED_SCL),
-                digitalRead(PIN_LORA_BUSY), digitalRead(PIN_LORA_DIO1));
+                digitalRead(PIN_OLED_RST), digitalRead(PIN_LORA_BUSY),
+                digitalRead(PIN_LORA_DIO1));
   }
   delay(5);
 }
